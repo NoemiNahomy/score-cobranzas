@@ -99,7 +99,7 @@ with tab_car:
 
 # ---------------------------------------------------------------- dataset
 with tab_data:
-    st.write("**Cartera de tarjetas de crédito .** 30.025 registros con datos simulados "
+    st.write("**Cartera de tarjetas de crédito .** 30.025 registros "
              "con ruido aleatorio para esta prueba teórica; no corresponden a clientes reales. Montos en bolivianos (Bs), "
              "historial marzo–agosto 2026 (M5…M0) y variable objetivo en septiembre 2026.")
     d = obtener_dataset()
