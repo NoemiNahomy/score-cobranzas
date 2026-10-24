@@ -134,7 +134,7 @@ st.markdown("##### ¿Qué clientes en mora tienen más probabilidad de pagar el 
 st.caption("Datos con ruido")
 
 tab_car, tab_cli, tab_info, tab_data = st.tabs(
-    ["📋 Resumen de cartera", "👤 Evaluar un cliente", "ℹ️ Cómo leer el score", "🗂️ Datos de prueba"]
+    ["📋 Resumen de cartera", "👤 Evaluar un cliente", "ℹ️ Cómo leer el score", "🗂️ Datos"]
 )
 
 # ---------------------------------------------------------------- resumen de cartera
@@ -283,7 +283,7 @@ El límite de crédito, el departamento, el tipo de empleo y el historial de los
 
 # ---------------------------------------------------------------- datos de prueba
 with tab_data:
-    st.write("**Cartera de tarjetas de crédito.** 30.025 registros con ruido aleatorio para esta prueba teórica; "
+    st.write("**Cartera de tarjetas de crédito.** 30.025 registros con ruido aleatorio  esta prueba teórica-practica; "
              "no corresponden a clientes reales. Montos en bolivianos (Bs), historial marzo–agosto 2026 (M5…M0) "
              "y variable objetivo en septiembre 2026.")
     st.dataframe(obtener_dataset().head(50), use_container_width=True, hide_index=True)
