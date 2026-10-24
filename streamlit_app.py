@@ -1,4 +1,8 @@
+import unicodedata
+
+import altair as alt
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
 
 import modelo as sc
@@ -25,6 +29,19 @@ NOMBRES_COL = {
     "DEPARTAMENTO": "Departamento",
     "TIPO_EMPLEO": "Tipo de empleo",
 }
+
+
+# Capitales de departamento (lat, lon) para ubicar cada departamento en el mapa
+COORD_DEPTO = {
+    "LA PAZ": (-16.4897, -68.1193), "SANTA CRUZ": (-17.7833, -63.1821), "COCHABAMBA": (-17.3895, -66.1568),
+    "ORURO": (-17.9647, -67.1060), "POTOSI": (-19.5836, -65.7531), "CHUQUISACA": (-19.0196, -65.2619),
+    "TARIJA": (-21.5355, -64.7296), "BENI": (-14.8333, -64.9000), "PANDO": (-11.0267, -68.7692),
+}
+MIN_GRUPO = 30  # grupos con menos clientes no se usan para conclusiones (porcentajes poco estables)
+
+
+def normalizar(texto) -> str:
+    return unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode().upper().strip()
 
 
 def fmt(x: float) -> str:
@@ -126,15 +143,103 @@ def barra_distribucion(partes: list[tuple[str, float]]) -> str:
     return f'<div style="display:flex;height:30px;border-radius:8px;overflow:hidden;margin:4px 0 18px;">{bloques}</div>'
 
 
+# ---------------------------------------------------------------- análisis de perfil
+def resumen_por(df: pd.DataFrame, col: str, seg: str) -> pd.DataFrame:
+    """Por cada valor de `col`: clientes en mora, clientes del segmento, % del grupo y % del segmento."""
+    g = (df.assign(_sel=df.SEGMENTO == seg)
+           .groupby(col)
+           .agg(en_mora=("SCORE", "size"), sel=("_sel", "sum"), prob=("PROB_PAGO", "mean")))
+    g["pct"] = g.sel / g.en_mora
+    g["part"] = g.sel / g.sel.sum() if g.sel.sum() else 0
+    return g.sort_values("pct", ascending=False)
+
+
+def grafico_barras(g: pd.DataFrame, titulo_cat: str, seg: str, color: str, promedio: float):
+    d = g.reset_index().rename(columns={g.index.name: "cat"})
+    d["etiqueta"] = [f"{p:.0%}  ({fmt(n)})" for p, n in zip(d.pct, d.sel)]
+    orden_y = alt.EncodingSortField("pct", order="descending")
+    base = alt.Chart(d).encode(y=alt.Y("cat:N", sort=orden_y, title=None))
+    barras = base.mark_bar(color=color, cornerRadiusEnd=4).encode(
+        x=alt.X("pct:Q", title=f"% de clientes en mora que son «{seg}»", axis=alt.Axis(format="%")),
+        tooltip=[
+            alt.Tooltip("cat:N", title=titulo_cat),
+            alt.Tooltip("en_mora:Q", title="Clientes en mora", format=",.0f"),
+            alt.Tooltip("sel:Q", title=f"Clientes «{seg}»", format=",.0f"),
+            alt.Tooltip("pct:Q", title="% del grupo", format=".0%"),
+            alt.Tooltip("part:Q", title="% del segmento", format=".0%"),
+        ],
+    )
+    texto = base.mark_text(align="left", dx=5, fontSize=12).encode(x="pct:Q", text="etiqueta:N")
+    regla = (alt.Chart(pd.DataFrame({"x": [promedio], "t": [f"Promedio cartera: {promedio:.0%}"]}))
+               .mark_rule(strokeDash=[5, 4], color="gray").encode(x="x:Q", tooltip=alt.Tooltip("t:N", title="")))
+    return (barras + texto + regla).properties(height=max(220, 36 * len(d)))
+
+
+def hallazgo(g: pd.DataFrame, seg: str, promedio: float, articulo: str) -> str:
+    validos = g[g.en_mora >= MIN_GRUPO]
+    if validos.empty or g.sel.sum() == 0:
+        return "No hay suficientes clientes para sacar conclusiones."
+    top_pct, top_n = validos.pct.idxmax(), g.sel.idxmax()
+    return (f"**Mayor riesgo relativo:** {articulo} **{top_pct}**, el {validos.pct[top_pct]:.0%} de los clientes en mora "
+            f"es «{seg}» (promedio de la cartera: {promedio:.0%}).  \n"
+            f"**Mayor volumen:** {articulo} **{top_n}** se concentran {fmt(g.sel[top_n])} clientes, "
+            f"el {g.part[top_n]:.0%} de todo el segmento.")
+
+
+def mapa_departamentos(g: pd.DataFrame, seg: str, color_hex: str):
+    d = g.reset_index().rename(columns={g.index.name: "nombre"})
+    d["clave"] = d.nombre.map(normalizar)
+    d = d[d.clave.isin(COORD_DEPTO)].copy()
+    if d.empty:
+        return None
+    d["lat"] = d.clave.map(lambda k: COORD_DEPTO[k][0])
+    d["lon"] = d.clave.map(lambda k: COORD_DEPTO[k][1])
+    maximo = max(d.sel.max(), 1)
+    d["radio"] = 15_000 + 75_000 * (d.sel / maximo) ** 0.5           # tamaño = cantidad de clientes
+    r, gg, b = (int(color_hex[i:i + 2], 16) for i in (1, 3, 5))
+    pmax = max(d.pct.max(), 1e-9)
+    d["color"] = [[r, gg, b, int(70 + 170 * p / pmax)] for p in d.pct]  # intensidad = % del departamento
+    d["sel_txt"] = d.sel.map(fmt)
+    d["pct_txt"] = d.pct.map(lambda p: f"{p:.0%}")
+    d["mora_txt"] = d.en_mora.map(fmt)
+
+    capas = [
+        pdk.Layer("ScatterplotLayer", data=d, get_position=["lon", "lat"], get_radius="radio",
+                  get_fill_color="color", get_line_color=[255, 255, 255], stroked=True,
+                  line_width_min_pixels=1, pickable=True),
+        pdk.Layer("TextLayer", data=d, get_position=["lon", "lat"], get_text="nombre", get_size=13,
+                  get_color=[40, 40, 40], get_pixel_offset=[0, -22], font_weight=600),
+    ]
+    tooltip = {"html": f"<b>{{nombre}}</b><br/>Clientes «{seg}»: {{sel_txt}}<br/>"
+                       "% de su cartera en mora: {pct_txt}<br/>Clientes en mora: {mora_txt}"}
+    return pdk.Deck(layers=capas, tooltip=tooltip, map_style=None,
+                    initial_view_state=pdk.ViewState(latitude=-16.6, longitude=-64.8, zoom=4.4))
+
+
+def perfil_tipico(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {}
+    facturado = df[sc.FACTURADOS].clip(lower=0).sum().sum()
+    pagado = df[sc.PAGADOS].sum().sum()
+    return {
+        "Clientes": fmt(len(df)),
+        "Límite de crédito promedio (Bs)": fmt(df.MTO_LIMITE_CREDITO.mean()),
+        "Facturado promedio en agosto (Bs)": fmt(df.MTO_FACTURADO_M0.mean()),
+        "Meses de atraso en agosto (promedio)": f"{df.EST_PAGO_M0.mean():.1f}",
+        "Meses con atraso en el semestre": f"{(df[sc.ESTADOS] >= 1).sum(axis=1).mean():.1f} de 6",
+        "Pagó del total facturado (6 meses)": f"{pagado / facturado:.0%}" if facturado else "—",
+    }
+
+
 # ---------------------------------------------------------------- encabezado
 mdl, metricas, origen = obtener_modelo()
 
 st.title("📊 Score de Cobranzas")
 st.markdown("##### ¿Qué clientes en mora tienen más probabilidad de pagar el próximo mes?")
-st.caption("Datos con ruido")
+st.caption("Prueba con datos ficticios (ruido aleatorio): no corresponden a clientes reales.")
 
-tab_car, tab_cli, tab_info, tab_data = st.tabs(
-    ["📋 Resumen de cartera", "👤 Evaluar un cliente", "ℹ️ Cómo leer el score", "🗂️ Datos"]
+tab_car, tab_perf, tab_cli, tab_info, tab_data = st.tabs(
+    ["📋 Resumen de cartera", "🔎 Perfil de riesgo", "👤 Evaluar un cliente", "ℹ️ Cómo leer el score", "🗂️ Datos de prueba"]
 )
 
 # ---------------------------------------------------------------- resumen de cartera
@@ -195,6 +300,83 @@ with tab_car:
             "Límite de crédito (Bs)": st.column_config.NumberColumn(format="%d"),
         },
     )
+
+# ---------------------------------------------------------------- perfil de riesgo
+with tab_perf:
+    st.write("¿Quiénes son los clientes con menor probabilidad de pago, dónde están y en qué trabajan?")
+    seg_sel = st.selectbox("Segmento a analizar", orden, index=len(orden) - 1)
+    color_sel = color_segmento(seg_sel)
+    grupo = res[res.SEGMENTO == seg_sel]
+    prom_cartera = (res.SEGMENTO == seg_sel).mean()
+
+    p1, p2, p3 = st.columns(3)
+    p1.metric(f"Clientes «{seg_sel}»", fmt(len(grupo)))
+    p2.metric("% de la cartera en mora", f"{prom_cartera:.0%}")
+    p3.metric("Probabilidad promedio de pago", f"{grupo.PROB_PAGO.mean():.0f} %" if len(grupo) else "—")
+
+    # --- ubicación geográfica
+    st.markdown("### 📍 ¿Dónde están?")
+    g_depto = resumen_por(res, "DEPARTAMENTO", seg_sel)
+    st.info(hallazgo(g_depto, seg_sel, prom_cartera, "En"))
+    m1, m2 = st.columns([1, 1.15], gap="large")
+    with m1:
+        mapa = mapa_departamentos(g_depto, seg_sel, color_sel)
+        if mapa is not None:
+            st.pydeck_chart(mapa, use_container_width=True)
+            st.caption("Tamaño del círculo = cantidad de clientes del segmento · Intensidad del color = % de la cartera en mora del departamento.")
+        else:
+            st.caption("No se pudieron ubicar los departamentos en el mapa.")
+    with m2:
+        st.altair_chart(grafico_barras(g_depto, "Departamento", seg_sel, color_sel, prom_cartera),
+                        use_container_width=True)
+        st.caption("La línea punteada es el promedio de toda la cartera en mora. Barras a la derecha de la línea = departamentos con más riesgo que el promedio.")
+
+    # --- tipo de empleo
+    st.markdown("### 💼 ¿En qué trabajan?")
+    g_emp = resumen_por(res, "TIPO_EMPLEO", seg_sel)
+    st.info(hallazgo(g_emp, seg_sel, prom_cartera, "Entre los clientes con empleo"))
+    st.altair_chart(grafico_barras(g_emp, "Tipo de empleo", seg_sel, color_sel, prom_cartera),
+                    use_container_width=True)
+
+    # --- combinación departamento × empleo
+    st.markdown("### 🧩 ¿Qué combinaciones concentran más riesgo?")
+    st.caption(f"% de clientes «{seg_sel}» en cada combinación de departamento y tipo de empleo. "
+               f"Se ocultan combinaciones con menos de {MIN_GRUPO} clientes en mora.")
+    cruce = (res.assign(_sel=res.SEGMENTO == seg_sel)
+                .groupby(["DEPARTAMENTO", "TIPO_EMPLEO"])
+                .agg(en_mora=("SCORE", "size"), sel=("_sel", "sum"))
+                .reset_index())
+    cruce["pct"] = cruce.sel / cruce.en_mora
+    cruce = cruce[cruce.en_mora >= MIN_GRUPO]
+    if not cruce.empty:
+        base = alt.Chart(cruce).encode(
+            x=alt.X("TIPO_EMPLEO:N", title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("DEPARTAMENTO:N", title=None),
+        )
+        calor = base.mark_rect(cornerRadius=3).encode(
+            color=alt.Color("pct:Q", title="% del grupo", scale=alt.Scale(range=["#f6f6f6", color_sel]),
+                            legend=alt.Legend(format="%")),
+            tooltip=[alt.Tooltip("DEPARTAMENTO:N", title="Departamento"),
+                     alt.Tooltip("TIPO_EMPLEO:N", title="Tipo de empleo"),
+                     alt.Tooltip("en_mora:Q", title="Clientes en mora", format=",.0f"),
+                     alt.Tooltip("sel:Q", title=f"Clientes «{seg_sel}»", format=",.0f"),
+                     alt.Tooltip("pct:Q", title="% del grupo", format=".0%")],
+        )
+        valores = base.mark_text(fontSize=12).encode(
+            text=alt.Text("pct:Q", format=".0%"),
+            color=alt.condition(alt.datum.pct > cruce.pct.median(), alt.value("white"), alt.value("#333")),
+        )
+        st.altair_chart((calor + valores).properties(height=max(240, 38 * cruce.DEPARTAMENTO.nunique())),
+                        use_container_width=True)
+    else:
+        st.caption("No hay combinaciones con suficientes clientes.")
+
+    # --- perfil típico
+    st.markdown("### 🧾 ¿Cómo es el cliente típico de cada segmento?")
+    tabla = pd.DataFrame({nm: perfil_tipico(res[res.SEGMENTO == nm]) for nm in orden})
+    tabla["Toda la cartera en mora"] = pd.Series(perfil_tipico(res))
+    st.dataframe(tabla, use_container_width=True)
+    st.caption("Comparar la columna del segmento con «Toda la cartera en mora» muestra qué lo diferencia del promedio.")
 
 # ---------------------------------------------------------------- evaluar un cliente
 with tab_cli:
@@ -283,7 +465,7 @@ El límite de crédito, el departamento, el tipo de empleo y el historial de los
 
 # ---------------------------------------------------------------- datos de prueba
 with tab_data:
-    st.write("**Cartera de tarjetas de crédito.** 30.025 registros con ruido aleatorio  esta prueba teórica-practica; "
+    st.write("**Cartera de tarjetas de crédito.** 30.025 registros con ruido aleatorio para esta prueba teórica; "
              "no corresponden a clientes reales. Montos en bolivianos (Bs), historial marzo–agosto 2026 (M5…M0) "
              "y variable objetivo en septiembre 2026.")
     st.dataframe(obtener_dataset().head(50), use_container_width=True, hide_index=True)
