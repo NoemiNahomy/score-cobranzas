@@ -1,4 +1,5 @@
 import unicodedata
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
@@ -38,6 +39,7 @@ COORD_DEPTO = {
     "TARIJA": (-21.5355, -64.7296), "BENI": (-14.8333, -64.9000), "PANDO": (-11.0267, -68.7692),
 }
 MIN_GRUPO = 30  # grupos con menos clientes no se usan para conclusiones (porcentajes poco estables)
+FIG_DIR = Path(__file__).parent / "fig"  # carpeta con las figuras exportadas del notebook
 
 
 def normalizar(texto) -> str:
@@ -141,6 +143,18 @@ def barra_distribucion(partes: list[tuple[str, float]]) -> str:
         for nm, p in partes if p > 0
     )
     return f'<div style="display:flex;height:30px;border-radius:8px;overflow:hidden;margin:4px 0 18px;">{bloques}</div>'
+
+
+def mostrar_figura(nombre: str, pie: str = "", ancho: int | None = None):
+    """Muestra una imagen de la carpeta fig/; si falta, avisa en vez de romper la app."""
+    ruta = FIG_DIR / nombre
+    if not ruta.exists():
+        st.caption(f"Falta la figura `{nombre}` en la carpeta `fig/`.")
+        return
+    if ancho:
+        st.image(str(ruta), caption=pie or None, width=ancho)
+    else:
+        st.image(str(ruta), caption=pie or None, use_container_width=True)
 
 
 # ---------------------------------------------------------------- análisis de perfil
@@ -454,6 +468,14 @@ al que pagó en el **{metricas['auc']:.0%} de los casos**.
 El límite de crédito, el departamento, el tipo de empleo y el historial de los últimos 6 meses
 (situación de pago, monto facturado y monto pagado). **No usa** sexo, educación, estado civil ni edad.
 """)
+
+    st.markdown("### Curvas ROC en el conjunto de prueba")
+    mostrar_figura(
+        "08_roc.png",
+        pie="Mientras más se acerque la curva a la esquina superior izquierda, mejor separa a quienes pagan de quienes no. "
+            "Compara los 8 modelos candidatos; la app usa la regresión logística sin variables demográficas.",
+        ancho=600,
+    )
 
     with st.expander("Detalle técnico"):
         st.markdown(f"""
